@@ -777,6 +777,10 @@ body,
   pointer-events: none;
 }
 
+.map-filter-popup__export-link {
+  display: none;
+}
+
 .map-filter-section {
   margin-bottom: 10px;
 }

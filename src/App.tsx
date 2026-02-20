@@ -73,6 +73,26 @@ const FEMALE_AGE_COLORS = [
   '#fbcfe8', '#f9a8d4', '#f472b6', '#ec4899', '#db2777', '#be185d', '#fda4af', '#fb7185',
   '#fb4f6d', '#f43f5e', '#e11d48', '#be123c', '#9d174d', '#d946ef', '#c026d3', '#a21caf',
 ]
+const POI_CATEGORY_COLUMNS = [
+  'Amusement and Recreation',
+  'Auto and Gasoline Service Stations',
+  'Automotive Dealers',
+  "Children's Activities",
+  'Civic and Social Organizations',
+  'Eating Places',
+  'Education',
+  'Entertainment',
+  'Fashion and Apparel',
+  'Grocery Stores',
+  'Healthcare',
+  'Hotels',
+  'Industrial and Commercial Zones',
+  'Retail',
+  'Salon/Spa',
+  'Services',
+  'Sports and Fitness Centers',
+  'Transportation',
+]
 
 function buildDonutGradient(values: number[], colors: string[]) {
   const normalizedValues = values.map((value) =>
@@ -104,6 +124,11 @@ function App() {
   const mapFilterRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<mapboxgl.Map | null>(null)
   const exportDataRef = useRef<Record<string, string | number>[]>([])
+  const poiCountsCacheRef = useRef<Map<string, Record<string, number>>>(new Map())
+  const exportCacheRef = useRef<{
+    key: string
+    data: Record<string, string | number>[]
+  } | null>(null)
   const clusterRef = useRef<Supercluster<Store, Store> | null>(null)
   const filteredClusterRef = useRef<Supercluster<Store, Store> | null>(null)
   const clusterMarkersRef = useRef<Map<string | number, mapboxgl.Marker>>(new Map())
@@ -310,8 +335,22 @@ function App() {
   }, [stores, query, filterType, selectedFilters])
 
   const buildExportRows = useCallback(async () => {
+    const exportKey = [...filteredStores.map((store) => store.id)].sort().join('|')
+
+    if (exportCacheRef.current?.key === exportKey) {
+      const cached = exportCacheRef.current.data
+      exportDataRef.current = cached
+      setExportData(cached)
+      return cached
+    }
+
     const storeRowsWithPoi = await Promise.all(
       filteredStores.map(async (store) => {
+        const cached = poiCountsCacheRef.current.get(store.id)
+        if (cached) {
+          return { store, poiCounts: cached }
+        }
+
         let poiCounts: Record<string, number> = {}
         try {
           const response = await fetch(
@@ -328,6 +367,7 @@ function App() {
           poiCounts = {}
         }
 
+        poiCountsCacheRef.current.set(store.id, poiCounts)
         return {
           store,
           poiCounts,
@@ -335,11 +375,7 @@ function App() {
       }),
     )
 
-    const poiCategories = Array.from(
-      new Set(
-        storeRowsWithPoi.flatMap((entry) => Object.keys(entry.poiCounts || {})),
-      ),
-    ).sort((a, b) => a.localeCompare(b))
+    const poiCategories = POI_CATEGORY_COLUMNS
 
     const baseHeaders = [
       { label: 'Store ID', key: 'id' },
@@ -381,6 +417,7 @@ function App() {
     })
 
     exportDataRef.current = storeRows
+    exportCacheRef.current = { key: exportKey, data: storeRows }
     setExportData(storeRows)
     setExportHeaders([...baseHeaders, ...poiHeaders])
     setExportFilename(`filtered-stores-${Date.now()}.csv`)
@@ -1054,9 +1091,7 @@ function App() {
                           <input
                             type="checkbox"
                             checked={selectedFilters.store_size.includes(value)}
-                            onChange={() =>
-                              toggleMultiSelectFilter('store_size', value)
-                            }
+                            onChange={() => toggleMultiSelectFilter('store_size', value)}
                           />
                           <span>{value}</span>
                         </label>
@@ -1142,29 +1177,34 @@ function App() {
                 </div>
 
                 <div className="map-filter-popup__actions">
-                  <CSVLink
-                    data={exportData}
-                    headers={exportHeaders}
-                    filename={exportFilename}
-                    asyncOnClick
-                    onClick={async (_event, done) => {
-                      if (isExporting || filteredStores.length === 0) {
-                        done(false)
-                        return
-                      }
-                      setIsExporting(true)
-                      await buildExportRows()
-                      requestAnimationFrame(() => {
-                        setIsExporting(false)
-                        done(true)
-                      })
-                    }}
+                  <button
+                    type="button"
                     className={`map-filter-popup__export ${
                       isExporting || filteredStores.length === 0 ? 'disabled' : ''
                     }`}
+                    onClick={async () => {
+                      if (isExporting || filteredStores.length === 0) return
+                      setIsExporting(true)
+                      await buildExportRows()
+                      setIsExporting(false)
+                      setTimeout(() => {
+                        const link = document.getElementById(
+                          'csv-download-link',
+                        ) as HTMLAnchorElement | null
+                        link?.click()
+                      }, 0)
+                    }}
+                    disabled={isExporting || filteredStores.length === 0}
                   >
                     {isExporting ? 'Preparing CSV...' : 'Export CSV'}
-                  </CSVLink>
+                  </button>
+                  <CSVLink
+                    id="csv-download-link"
+                    data={exportData}
+                    headers={exportHeaders}
+                    filename={exportFilename}
+                    className="map-filter-popup__export-link"
+                  />
                 </div>
               </div>
             )}
@@ -1272,7 +1312,11 @@ function App() {
                     </div>
                     <div className="store-item">
                       <label>Population Total</label>
-                      <span>{selectedStore.T_TL ? selectedStore.T_TL.toLocaleString() : 'N/A'}</span>
+                      <span>
+                        {selectedStore.T_TL
+                          ? Math.round(selectedStore.T_TL).toLocaleString()
+                          : 'N/A'}
+                      </span>
                     </div>
                     <div className="store-item">
                       <label>Expenditure</label>
