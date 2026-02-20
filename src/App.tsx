@@ -6,6 +6,7 @@ import logoSrc from './assets/propheus.png'
 import alfamartLogo from './assets/alfamartlogo.png'
 import Supercluster from 'supercluster'
 import { loadStoresFromCSV, type Store } from './utils/csvParser'
+import { CSVLink } from 'react-csv'
 
 type SimilarStore = {
   id: string
@@ -33,6 +34,15 @@ type NearbyPlacesResponse = {
   stores: NearbyPlace[]
   counts: Record<string, number>
 }
+
+type MultiSelectFilters = {
+  location_type: string[]
+  store_size: string[]
+  parking: string[]
+  expenditure_band: string[]
+}
+
+type FilterSectionKey = keyof MultiSelectFilters
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) || 'http://10.0.2.45:8000'
 const POI_CONNECTION_SOURCE_ID = 'poi-connections-source'
@@ -91,7 +101,9 @@ function buildDonutGradient(values: number[], colors: string[]) {
 function App() {
   const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined
   const mapContainerRef = useRef<HTMLDivElement | null>(null)
+  const mapFilterRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<mapboxgl.Map | null>(null)
+  const exportDataRef = useRef<Record<string, string | number>[]>([])
   const clusterRef = useRef<Supercluster<Store, Store> | null>(null)
   const filteredClusterRef = useRef<Supercluster<Store, Store> | null>(null)
   const clusterMarkersRef = useRef<Map<string | number, mapboxgl.Marker>>(new Map())
@@ -112,6 +124,26 @@ function App() {
   const [nearbyLoading, setNearbyLoading] = useState(false)
   const [nearbyError, setNearbyError] = useState<string | null>(null)
   const [selectedPoiId, setSelectedPoiId] = useState<string | null>(null)
+  const [expandedCategory, setExpandedCategory] = useState<string | null>(null)
+  const [isMapFilterOpen, setIsMapFilterOpen] = useState(false)
+  const [selectedFilters, setSelectedFilters] = useState<MultiSelectFilters>({
+    location_type: [],
+    store_size: [],
+    parking: [],
+    expenditure_band: [],
+  })
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportData, setExportData] = useState<Record<string, string | number>[]>([])
+  const [exportHeaders, setExportHeaders] = useState<{ label: string; key: string }[]>([])
+  const [exportFilename, setExportFilename] = useState('filtered-stores.csv')
+  const [expandedFilterSections, setExpandedFilterSections] = useState<
+    Record<FilterSectionKey, boolean>
+  >({
+    location_type: false,
+    store_size: false,
+    parking: false,
+    expenditure_band: false,
+  })
   const [hoveredMaleAgeIndex, setHoveredMaleAgeIndex] = useState<number | null>(null)
   const [hoveredFemaleAgeIndex, setHoveredFemaleAgeIndex] = useState<number | null>(null)
 
@@ -155,38 +187,228 @@ function App() {
     clusterRef.current = cluster
   }, [stores])
 
+  const filterOptions = useMemo(
+    () => ({
+      location_type: Array.from(
+        new Set(
+          stores
+            .map((store) => store.location_type?.trim())
+            .filter((value): value is string => Boolean(value)),
+        ),
+      ).sort((a, b) => a.localeCompare(b)),
+      store_size: Array.from(
+        new Set(
+          stores
+            .map((store) => store.store_size?.trim())
+            .filter((value): value is string => Boolean(value)),
+        ),
+      ).sort((a, b) => a.localeCompare(b)),
+      parking: Array.from(
+        new Set(
+          stores
+            .map((store) => store.parking?.trim())
+            .filter((value): value is string => Boolean(value)),
+        ),
+      ).sort((a, b) => a.localeCompare(b)),
+      expenditure_band: Array.from(
+        new Set(
+          stores
+            .map((store) => store.expenditure_band?.trim())
+            .filter((value): value is string => Boolean(value)),
+        ),
+      ).sort((a, b) => a.localeCompare(b)),
+    }),
+    [stores],
+  )
+
+  const activeFilterCount = useMemo(
+    () =>
+      selectedFilters.location_type.length +
+      selectedFilters.store_size.length +
+      selectedFilters.parking.length +
+      selectedFilters.expenditure_band.length,
+    [selectedFilters],
+  )
+
+  const toggleMultiSelectFilter = useCallback(
+    (filterKey: keyof MultiSelectFilters, value: string) => {
+      setSelectedFilters((prev) => {
+        const alreadySelected = prev[filterKey].includes(value)
+        return {
+          ...prev,
+          [filterKey]: alreadySelected
+            ? prev[filterKey].filter((item) => item !== value)
+            : [...prev[filterKey], value],
+        }
+      })
+    },
+    [],
+  )
+
+  const clearAllMultiFilters = useCallback(() => {
+    setSelectedFilters({
+      location_type: [],
+      store_size: [],
+      parking: [],
+      expenditure_band: [],
+    })
+  }, [])
+
+  const toggleFilterSection = useCallback((section: FilterSectionKey) => {
+    setExpandedFilterSections((prev) => ({
+      ...prev,
+      [section]: !prev[section],
+    }))
+  }, [])
+
   // Filter stores based on search query
   const filteredStores = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase()
-    if (!normalizedQuery) return stores
-    
-    if (filterType === 'name_address') {
-      // Create a regex for word boundary matching
-      const wordBoundaryRegex = new RegExp(`\\b${normalizedQuery}`, 'i')
-      return stores.filter((store) =>
-        wordBoundaryRegex.test(store.name) ||
-        wordBoundaryRegex.test(store.address)
-      )
-    } else if (filterType === 'location_type') {
-      return stores.filter((store) =>
-        store.location_type?.toLowerCase().includes(normalizedQuery)
-      )
-    } else if (filterType === 'store_size') {
-      return stores.filter((store) =>
-        store.store_size?.toLowerCase().includes(normalizedQuery)
-      )
-    } else if (filterType === 'parking') {
-      return stores.filter((store) =>
-        store.parking?.toLowerCase().includes(normalizedQuery)
-      )
-    } else if (filterType === 'expenditure') {
-      return stores.filter((store) =>
-        store.expenditure_band?.toLowerCase().includes(normalizedQuery)
-      )
+
+    return stores.filter((store) => {
+      let matchesSearch = true
+
+      if (normalizedQuery) {
+        if (filterType === 'name_address') {
+          const wordBoundaryRegex = new RegExp(`\\b${normalizedQuery}`, 'i')
+          matchesSearch =
+            wordBoundaryRegex.test(store.name) ||
+            wordBoundaryRegex.test(store.address)
+        } else if (filterType === 'location_type') {
+          matchesSearch = store.location_type
+            ?.toLowerCase()
+            .includes(normalizedQuery) || false
+        } else if (filterType === 'store_size') {
+          matchesSearch = store.store_size?.toLowerCase().includes(normalizedQuery) || false
+        } else if (filterType === 'parking') {
+          matchesSearch = store.parking?.toLowerCase().includes(normalizedQuery) || false
+        } else if (filterType === 'expenditure') {
+          matchesSearch =
+            store.expenditure_band?.toLowerCase().includes(normalizedQuery) || false
+        }
+      }
+
+      if (!matchesSearch) return false
+
+      const storeLocationType = store.location_type?.trim() || ''
+      const storeSize = store.store_size?.trim() || ''
+      const storeParking = store.parking?.trim() || ''
+      const storeExpenditure = store.expenditure_band?.trim() || ''
+
+      const matchesMultiFilters =
+        (selectedFilters.location_type.length === 0 ||
+          selectedFilters.location_type.includes(storeLocationType)) &&
+        (selectedFilters.store_size.length === 0 ||
+          selectedFilters.store_size.includes(storeSize)) &&
+        (selectedFilters.parking.length === 0 ||
+          selectedFilters.parking.includes(storeParking)) &&
+        (selectedFilters.expenditure_band.length === 0 ||
+          selectedFilters.expenditure_band.includes(storeExpenditure))
+
+      return matchesMultiFilters
+    })
+  }, [stores, query, filterType, selectedFilters])
+
+  const buildExportRows = useCallback(async () => {
+    const storeRowsWithPoi = await Promise.all(
+      filteredStores.map(async (store) => {
+        let poiCounts: Record<string, number> = {}
+        try {
+          const response = await fetch(
+            `${API_BASE_URL}/nearby_places?id=${encodeURIComponent(store.id)}&radius_m=250`,
+            {
+              headers: { accept: 'application/json' },
+            },
+          )
+          if (response.ok) {
+            const data = (await response.json()) as NearbyPlacesResponse
+            poiCounts = data.counts || {}
+          }
+        } catch {
+          poiCounts = {}
+        }
+
+        return {
+          store,
+          poiCounts,
+        }
+      }),
+    )
+
+    const poiCategories = Array.from(
+      new Set(
+        storeRowsWithPoi.flatMap((entry) => Object.keys(entry.poiCounts || {})),
+      ),
+    ).sort((a, b) => a.localeCompare(b))
+
+    const baseHeaders = [
+      { label: 'Store ID', key: 'id' },
+      { label: 'Store Name', key: 'name' },
+      { label: 'Address', key: 'address' },
+      { label: 'Location Type', key: 'location_type' },
+      { label: 'Store Size', key: 'store_size' },
+      { label: 'Parking', key: 'parking' },
+      { label: 'Expenditure Band', key: 'expenditure_band' },
+      { label: 'Population Total', key: 'T_TL' },
+      { label: 'Male Population', key: 'M_TL' },
+      { label: 'Female Population', key: 'F_TL' },
+    ]
+
+    const poiHeaders = poiCategories.map((category) => ({
+      label: `POI ${category}`,
+      key: `poi_${category}`,
+    }))
+
+    const storeRows = storeRowsWithPoi.map(({ store, poiCounts }) => {
+      const baseRow: Record<string, string | number> = {
+        id: store.id,
+        name: store.name,
+        address: store.address,
+        location_type: store.location_type || '',
+        store_size: store.store_size || '',
+        parking: store.parking || '',
+        expenditure_band: store.expenditure_band || '',
+        T_TL: store.T_TL || 0,
+        M_TL: store.M_TL || 0,
+        F_TL: store.F_TL || 0,
+      }
+
+      poiCategories.forEach((category) => {
+        baseRow[`poi_${category}`] = poiCounts?.[category] ?? 0
+      })
+
+      return baseRow
+    })
+
+    exportDataRef.current = storeRows
+    setExportData(storeRows)
+    setExportHeaders([...baseHeaders, ...poiHeaders])
+    setExportFilename(`filtered-stores-${Date.now()}.csv`)
+    return storeRows
+  }, [filteredStores])
+
+  useEffect(() => {
+    const handleOutsideClick = (event: MouseEvent) => {
+      if (
+        isMapFilterOpen &&
+        mapFilterRef.current &&
+        !mapFilterRef.current.contains(event.target as Node)
+      ) {
+        setIsMapFilterOpen(false)
+      }
     }
-    
-    return stores
-  }, [stores, query, filterType])
+
+    document.addEventListener('mousedown', handleOutsideClick)
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick)
+    }
+  }, [isMapFilterOpen])
+
+  useEffect(() => {
+    if (!mapboxToken || isLoading) {
+      setIsMapFilterOpen(false)
+    }
+  }, [mapboxToken, isLoading])
 
   // Update ref whenever filteredStores changes
   useEffect(() => {
@@ -219,8 +441,22 @@ function App() {
   const malePopulation = selectedStore?.M_TL || 0
   const femalePopulation = selectedStore?.F_TL || 0
   const genderTotal = malePopulation + femalePopulation
-  const malePct = genderTotal > 0 ? (malePopulation / genderTotal) * 100 : 0
-  const femalePct = genderTotal > 0 ? (femalePopulation / genderTotal) * 100 : 0
+  const displayedGenderTotal = Math.round(selectedStore?.T_TL || genderTotal)
+  const maleShare = genderTotal > 0 ? malePopulation / genderTotal : 0
+  const roundedMalePopulation =
+    displayedGenderTotal > 0 ? Math.round(maleShare * displayedGenderTotal) : 0
+  const roundedFemalePopulation = Math.max(
+    0,
+    displayedGenderTotal - roundedMalePopulation,
+  )
+  const malePct =
+    displayedGenderTotal > 0
+      ? (roundedMalePopulation / displayedGenderTotal) * 100
+      : 0
+  const femalePct =
+    displayedGenderTotal > 0
+      ? (roundedFemalePopulation / displayedGenderTotal) * 100
+      : 0
   const maleAgeValues = selectedStore
     ? [
         Number(selectedStore.M_00_04) || 0,
@@ -557,6 +793,7 @@ function App() {
       setNearbyError(null)
       setNearbyLoading(false)
       setSelectedPoiId(null)
+      setExpandedCategory(null)
       clearPoiMarkers()
       clearPoiConnections()
       return
@@ -570,6 +807,7 @@ function App() {
         setNearbyError(null)
         setSidebarTab('description')
         setSelectedPoiId(null)
+        setExpandedCategory(null)
         clearPoiMarkers()
         clearPoiConnections()
 
@@ -657,58 +895,7 @@ function App() {
     }
   }, [sidebarTab, nearbyPlaces, selectedPoiId, selectedStore, clearPoiMarkers])
 
-  // Render connection lines from selected Alfamart to nearby POIs
-  useEffect(() => {
-    const map = mapRef.current
-    if (!map || !selectedStore || sidebarTab !== 'nearby' || nearbyPlaces.length === 0) {
-      clearPoiConnections()
-      return
-    }
-
-    const lineGeoJson: GeoJSON.FeatureCollection<GeoJSON.LineString> = {
-      type: 'FeatureCollection',
-      features: nearbyPlaces.map((place) => ({
-        type: 'Feature',
-        geometry: {
-          type: 'LineString',
-          coordinates: [
-            [selectedStore.google_lon, selectedStore.google_lat],
-            [place.lon, place.lat],
-          ],
-        },
-        properties: {
-          id: place.id,
-        },
-      })),
-    }
-
-    const existingSource = map.getSource(POI_CONNECTION_SOURCE_ID) as mapboxgl.GeoJSONSource | undefined
-
-    if (existingSource) {
-      existingSource.setData(lineGeoJson)
-    } else {
-      map.addSource(POI_CONNECTION_SOURCE_ID, {
-        type: 'geojson',
-        data: lineGeoJson,
-      })
-
-      map.addLayer({
-        id: POI_CONNECTION_LAYER_ID,
-        type: 'line',
-        source: POI_CONNECTION_SOURCE_ID,
-        paint: {
-          'line-color': '#ff6b6b',
-          'line-width': 1.6,
-          'line-opacity': 0.55,
-          'line-dasharray': [1.2, 1.2],
-        },
-      })
-    }
-
-    return () => {
-      clearPoiConnections()
-    }
-  }, [sidebarTab, nearbyPlaces, selectedStore, clearPoiConnections])
+  // Connection lines removed per user request — no GeoJSON source or layer created here.
 
   return (
     <div className={`app-shell ${selectedStore ? 'with-right-sidebar' : ''}`}>
@@ -770,7 +957,221 @@ function App() {
           </div>
         )}
 
-        {filteredStores.length === 0 && query.trim() !== '' && (
+        {mapboxToken && !isLoading && (
+          <div className="map-filter" ref={mapFilterRef}>
+            <button
+              className={`map-filter-button ${isMapFilterOpen ? 'active' : ''}`}
+              onClick={() => setIsMapFilterOpen((prev) => !prev)}
+              aria-label="Open filters"
+            >
+              <span className="map-filter-button__icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M3 5h18l-7 8v5l-4 2v-7L3 5z" />
+                </svg>
+              </span>
+              {activeFilterCount > 0 && (
+                <span className="map-filter-button__count">{activeFilterCount}</span>
+              )}
+            </button>
+
+            {isMapFilterOpen && (
+              <div className="map-filter-popup">
+                <div className="map-filter-popup__header">
+                  <h4>Filters</h4>
+                  <button
+                    className="map-filter-popup__clear"
+                    onClick={clearAllMultiFilters}
+                    type="button"
+                  >
+                    Clear all
+                  </button>
+                </div>
+
+                <div className="map-filter-section">
+                  <button
+                    type="button"
+                    className="map-filter-section__toggle"
+                    onClick={() => toggleFilterSection('location_type')}
+                  >
+                    <span className="map-filter-section__title">Location Type</span>
+                    <span className="map-filter-section__right">
+                      {selectedFilters.location_type.length > 0 && (
+                        <span className="map-filter-section__count">
+                          {selectedFilters.location_type.length}
+                        </span>
+                      )}
+                      <span
+                        className={`map-filter-section__caret ${
+                          expandedFilterSections.location_type ? 'expanded' : ''
+                        }`}
+                      />
+                    </span>
+                  </button>
+
+                  {expandedFilterSections.location_type && (
+                    <div className="map-filter-options">
+                      {filterOptions.location_type.map((value) => (
+                        <label key={`location-${value}`} className="map-filter-option">
+                          <input
+                            type="checkbox"
+                            checked={selectedFilters.location_type.includes(value)}
+                            onChange={() =>
+                              toggleMultiSelectFilter('location_type', value)
+                            }
+                          />
+                          <span>{value}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="map-filter-section">
+                  <button
+                    type="button"
+                    className="map-filter-section__toggle"
+                    onClick={() => toggleFilterSection('store_size')}
+                  >
+                    <span className="map-filter-section__title">Store Size</span>
+                    <span className="map-filter-section__right">
+                      {selectedFilters.store_size.length > 0 && (
+                        <span className="map-filter-section__count">
+                          {selectedFilters.store_size.length}
+                        </span>
+                      )}
+                      <span
+                        className={`map-filter-section__caret ${
+                          expandedFilterSections.store_size ? 'expanded' : ''
+                        }`}
+                      />
+                    </span>
+                  </button>
+
+                  {expandedFilterSections.store_size && (
+                    <div className="map-filter-options">
+                      {filterOptions.store_size.map((value) => (
+                        <label key={`size-${value}`} className="map-filter-option">
+                          <input
+                            type="checkbox"
+                            checked={selectedFilters.store_size.includes(value)}
+                            onChange={() =>
+                              toggleMultiSelectFilter('store_size', value)
+                            }
+                          />
+                          <span>{value}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="map-filter-section">
+                  <button
+                    type="button"
+                    className="map-filter-section__toggle"
+                    onClick={() => toggleFilterSection('parking')}
+                  >
+                    <span className="map-filter-section__title">Parking</span>
+                    <span className="map-filter-section__right">
+                      {selectedFilters.parking.length > 0 && (
+                        <span className="map-filter-section__count">
+                          {selectedFilters.parking.length}
+                        </span>
+                      )}
+                      <span
+                        className={`map-filter-section__caret ${
+                          expandedFilterSections.parking ? 'expanded' : ''
+                        }`}
+                      />
+                    </span>
+                  </button>
+
+                  {expandedFilterSections.parking && (
+                    <div className="map-filter-options">
+                      {filterOptions.parking.map((value) => (
+                        <label key={`parking-${value}`} className="map-filter-option">
+                          <input
+                            type="checkbox"
+                            checked={selectedFilters.parking.includes(value)}
+                            onChange={() => toggleMultiSelectFilter('parking', value)}
+                          />
+                          <span>{value}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="map-filter-section">
+                  <button
+                    type="button"
+                    className="map-filter-section__toggle"
+                    onClick={() => toggleFilterSection('expenditure_band')}
+                  >
+                    <span className="map-filter-section__title">Expenditure</span>
+                    <span className="map-filter-section__right">
+                      {selectedFilters.expenditure_band.length > 0 && (
+                        <span className="map-filter-section__count">
+                          {selectedFilters.expenditure_band.length}
+                        </span>
+                      )}
+                      <span
+                        className={`map-filter-section__caret ${
+                          expandedFilterSections.expenditure_band ? 'expanded' : ''
+                        }`}
+                      />
+                    </span>
+                  </button>
+
+                  {expandedFilterSections.expenditure_band && (
+                    <div className="map-filter-options">
+                      {filterOptions.expenditure_band.map((value) => (
+                        <label key={`exp-${value}`} className="map-filter-option">
+                          <input
+                            type="checkbox"
+                            checked={selectedFilters.expenditure_band.includes(value)}
+                            onChange={() =>
+                              toggleMultiSelectFilter('expenditure_band', value)
+                            }
+                          />
+                          <span>{value}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="map-filter-popup__actions">
+                  <CSVLink
+                    data={exportData}
+                    headers={exportHeaders}
+                    filename={exportFilename}
+                    asyncOnClick
+                    onClick={async (_event, done) => {
+                      if (isExporting || filteredStores.length === 0) {
+                        done(false)
+                        return
+                      }
+                      setIsExporting(true)
+                      await buildExportRows()
+                      requestAnimationFrame(() => {
+                        setIsExporting(false)
+                        done(true)
+                      })
+                    }}
+                    className={`map-filter-popup__export ${
+                      isExporting || filteredStores.length === 0 ? 'disabled' : ''
+                    }`}
+                  >
+                    {isExporting ? 'Preparing CSV...' : 'Export CSV'}
+                  </CSVLink>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {filteredStores.length === 0 && (query.trim() !== '' || activeFilterCount > 0) && (
           <div className="no-results-message">
             No stores matched the criteria
           </div>
@@ -908,7 +1309,7 @@ function App() {
                         <div>
                           <div className="gender-legend__title">Male (M_TL)</div>
                           <div className="gender-legend__value">
-                            {malePopulation.toLocaleString()} ({malePct.toFixed(1)}%)
+                            {roundedMalePopulation.toLocaleString()} ({malePct.toFixed(1)}%)
                           </div>
                         </div>
                       </div>
@@ -917,11 +1318,11 @@ function App() {
                         <div>
                           <div className="gender-legend__title">Female (F_TL)</div>
                           <div className="gender-legend__value">
-                            {femalePopulation.toLocaleString()} ({femalePct.toFixed(1)}%)
+                            {roundedFemalePopulation.toLocaleString()} ({femalePct.toFixed(1)}%)
                           </div>
                         </div>
                       </div>
-                      <div className="gender-total">Total: {genderTotal.toLocaleString()}</div>
+                      <div className="gender-total">Total: {displayedGenderTotal.toLocaleString()}</div>
                     </div>
                   </div>
                 </div>
@@ -1034,41 +1435,54 @@ function App() {
                     <div className="sidebar-state">No nearby places found.</div>
                   ) : (
                     categoryEntries.map(([category, count]) => (
-                      <div className="category-row" key={category}>
-                        <div className="category-row__head">
-                          <span>{category}</span>
-                          <strong>{count}</strong>
-                        </div>
-                        <div className="category-row__track">
-                          <div
-                            className="category-row__fill"
-                            style={{ width: `${(count / maxCategoryCount) * 100}%` }}
-                          />
-                        </div>
+                      <div key={category}>
+                        <button
+                          className={`category-row ${expandedCategory === category ? 'expanded' : ''}`}
+                          onClick={() =>
+                            setExpandedCategory((prev) =>
+                              prev === category ? null : category,
+                            )
+                          }
+                        >
+                          <div className="category-row__head">
+                            <span>{category}</span>
+                            <strong>{count}</strong>
+                          </div>
+                          <div className="category-row__track">
+                            <div
+                              className="category-row__fill"
+                              style={{ width: `${(count / maxCategoryCount) * 100}%` }}
+                            />
+                          </div>
+                        </button>
+
+                        {expandedCategory === category && (
+                          <div className="item-list item-list--poi">
+                            {nearbyPlaces
+                              .filter((place) => place.top_category === category)
+                              .map((place) => (
+                                <button
+                                  key={place.id}
+                                  className={`item-row ${selectedPoiId === place.id ? 'active active-poi' : ''}`}
+                                  onClick={() => {
+                                    setSelectedPoiId(place.id)
+                                    mapRef.current?.flyTo({
+                                      center: [place.lon, place.lat],
+                                      zoom: Math.max(mapRef.current.getZoom(), 16),
+                                      duration: 600,
+                                    })
+                                  }}
+                                >
+                                  <div className="item-row__title">{place.name}</div>
+                                  <div className="item-row__meta">{place.top_category}</div>
+                                  <div className="item-row__subtitle">{place.address}</div>
+                                </button>
+                              ))}
+                          </div>
+                        )}
                       </div>
                     ))
                   )}
-                </div>
-
-                <div className="item-list item-list--poi">
-                  {nearbyPlaces.map((place) => (
-                    <button
-                      key={place.id}
-                      className={`item-row ${selectedPoiId === place.id ? 'active active-poi' : ''}`}
-                      onClick={() => {
-                        setSelectedPoiId(place.id)
-                        mapRef.current?.flyTo({
-                          center: [place.lon, place.lat],
-                          zoom: Math.max(mapRef.current.getZoom(), 16),
-                          duration: 600,
-                        })
-                      }}
-                    >
-                      <div className="item-row__title">{place.name}</div>
-                      <div className="item-row__meta">{place.top_category}</div>
-                      <div className="item-row__subtitle">{place.address}</div>
-                    </button>
-                  ))}
                 </div>
               </div>
             )}
